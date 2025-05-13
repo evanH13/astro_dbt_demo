@@ -1,100 +1,39 @@
-"""
-## Astronaut ETL example DAG
-
-This DAG queries the list of astronauts currently in space from the
-Open Notify API and prints each astronaut's name and flying craft.
-
-There are two tasks, one to get the data from the API and save the results,
-and another to print the results. Both tasks are written in Python using
-Airflow's TaskFlow API, which allows you to easily turn Python functions into
-Airflow tasks, and automatically infer dependencies and pass data.
-
-The second task uses dynamic task mapping to create a copy of the task for
-each Astronaut in the list retrieved from the API. This list will change
-depending on how many Astronauts are in space, and the DAG will adjust
-accordingly each time it runs.
-
-For more explanation and getting started instructions, see our Write your
-first DAG tutorial: https://www.astronomer.io/docs/learn/get-started-with-airflow
-
-![Picture of the ISS](https://www.esa.int/var/esa/storage/images/esa_multimedia/images/2010/02/space_station_over_earth/10293696-3-eng-GB/Space_Station_over_Earth_card_full.jpg)
-"""
-
-from airflow.sdk.definitions.asset import Asset
 from airflow.decorators import dag, task
+from airflow.providers.amazon.aws.hooks.s3 import S3Hook
+from airflow.providers.snowflake.hooks.snowflake import SnowflakeHook
 from pendulum import datetime
 import requests
+from io import StringIO
+import pandas as pd
 
-
-# Define the basic parameters of the DAG, like schedule and start_date
+# Fetch weather from open-meteo API
 @dag(
-    start_date=datetime(2024, 1, 1),
-    schedule="@daily",
+    dag_id='weather_fetcher',
+    schedule='@daily',
+    start_date=datetime(2025, 5, 12),
     catchup=False,
-    doc_md=__doc__,
-    default_args={"owner": "Astro", "retries": 3},
-    tags=["example"],
+    tags=['weather', 's3', 'snowflake', 'dbt'],
 )
-def example_astronauts():
-    # Define tasks
-    @task(
-        # Define a dataset outlet for the task. This can be used to schedule downstream DAGs when this task has run.
-        outlets=[Asset("current_astronauts")]
-    )  # Define that this task updates the `current_astronauts` Dataset
-    def get_astronauts(**context) -> list[dict]:
-        """
-        This task uses the requests library to retrieve a list of Astronauts
-        currently in space. The results are pushed to XCom with a specific key
-        so they can be used in a downstream pipeline. The task returns a list
-        of Astronauts to be used in the next task.
-        """
-        try:
-            r = requests.get("http://api.open-notify.org/astros.json")
-            r.raise_for_status()
-            number_of_people_in_space = r.json()["number"]
-            list_of_people_in_space = r.json()["people"]
-        except Exception:
-            print("API currently not available, using hardcoded data instead.")
-            number_of_people_in_space = 12
-            list_of_people_in_space = [
-                {"craft": "ISS", "name": "Oleg Kononenko"},
-                {"craft": "ISS", "name": "Nikolai Chub"},
-                {"craft": "ISS", "name": "Tracy Caldwell Dyson"},
-                {"craft": "ISS", "name": "Matthew Dominick"},
-                {"craft": "ISS", "name": "Michael Barratt"},
-                {"craft": "ISS", "name": "Jeanette Epps"},
-                {"craft": "ISS", "name": "Alexander Grebenkin"},
-                {"craft": "ISS", "name": "Butch Wilmore"},
-                {"craft": "ISS", "name": "Sunita Williams"},
-                {"craft": "Tiangong", "name": "Li Guangsu"},
-                {"craft": "Tiangong", "name": "Li Cong"},
-                {"craft": "Tiangong", "name": "Ye Guangfu"},
-            ]
-
-        context["ti"].xcom_push(
-            key="number_of_people_in_space", value=number_of_people_in_space
-        )
-        return list_of_people_in_space
-
+def weather_pipeline_dag():
     @task
-    def print_astronaut_craft(greeting: str, person_in_space: dict) -> None:
-        """
-        This task creates a print statement with the name of an
-        Astronaut in space and the craft they are flying on from
-        the API request results of the previous task, along with a
-        greeting which is hard-coded in this example.
-        """
-        craft = person_in_space["craft"]
-        name = person_in_space["name"]
+    def fetch_weather_data_los_angeles():
+        # Query the Open-Meteo API for Los Angeles weather data
+        response = requests.get("https://api.open-meteo.com/v1/forecast?latitude=35&longitude=139&hourly=temperature_2m")
+        # Load the data into a pandas DataFrame
+        df = pd.DataFrame(response.json()['hourly'])
+        # Convert the DataFrame to CSV format
+        csv_buffer = StringIO()
+        df.to_csv(csv_buffer, index=False)
 
-        print(f"{name} is currently in space flying on the {craft}! {greeting}")
+        # Upload the CSV data to S3
+        s3 = S3Hook(aws_conn_id="aws_default")
+        s3.load_string(
+            string_data=csv_buffer.getvalue(),
+            key='weather-data/raw_weather.csv',
+            bucket_name='evan-weather-bucket',
+            replace=True
+        )
+        return "raw_weather.csv uploaded"
+    fetch_weather_data_los_angeles()
 
-    # Use dynamic task mapping to run the print_astronaut_craft task for each
-    # Astronaut in space
-    print_astronaut_craft.partial(greeting="Hello! :)").expand(
-        person_in_space=get_astronauts()  # Define dependencies using TaskFlow API syntax
-    )
-
-
-# Instantiate the DAG
-example_astronauts()
+dag = weather_pipeline_dag()
