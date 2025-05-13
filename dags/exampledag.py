@@ -18,7 +18,7 @@ def weather_pipeline_dag():
     @task
     def fetch_weather_data_los_angeles():
         # Query the Open-Meteo API for Los Angeles weather data
-        response = requests.get("https://api.open-meteo.com/v1/forecast?latitude=35&longitude=139&hourly=temperature_2m")
+        response = requests.get("https://api.open-meteo.com/v1/forecast?latitude=34.0522&longitude=-118.2437&hourly=temperature_2m")
         # Load the data into a pandas DataFrame
         df = pd.DataFrame(response.json()['hourly'])
         # Convert the DataFrame to CSV format
